@@ -1,0 +1,3 @@
+# no build artifacts are expected in-tree — docker builds are self-contained
+*.log
+.DS_Store
