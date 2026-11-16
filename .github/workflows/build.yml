@@ -1,0 +1,114 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'build/**'
+      - 'modsec/**'
+      - 'rootfs-s6/**'
+      - 'test-runtime/**'
+      - 'scripts/**'
+      - 'docker-compose.test.yml'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * 1'   # weekly upstream drift check (Mondays)
+
+env:
+  NPM_VERSION: '2.17.0'
+  OPENRESTY_VERSION: '1.31.8.1'
+  MODSEC_VERSION: '3.0.17'
+  MODSEC_NGINX_VERSION: '1.0.4'
+  CRS_VERSION: 'v4.30.0'
+  IMAGE_NAME: npm-modsec
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # Keep workflow pins and Dockerfile ARGs in lockstep — fail before wasting
+  # 30+ min of build time on a mismatched pin set.
+  pins-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert env pins match build/Dockerfile ARGs
+        run: |
+          set -eu
+          for p in NPM_VERSION OPENRESTY_VERSION MODSEC_VERSION MODSEC_NGINX_VERSION CRS_VERSION; do
+            wf=$(printenv "$p")
+            df=$(sed -n "s/^ARG ${p}=//p" build/Dockerfile)
+            [ "$wf" = "$df" ] || { echo "::error::PIN MISMATCH ${p}: workflow='${wf}' dockerfile='${df}'"; exit 1; }
+          done
+          echo "pins in sync"
+
+  build:
+    if: github.event_name != 'schedule'
+    needs: pins-sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image ref
+        run: |
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}:${NPM_VERSION}-modsec${MODSEC_VERSION}-crs${CRS_VERSION#v}" >> "$GITHUB_ENV"
+          echo "IMAGE_LATEST=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}:latest" >> "$GITHUB_ENV"
+
+      # The Dockerfile's 'args' stage fails the build if the official image's
+      # openresty no longer matches OPENRESTY_VERSION — the ABI guardrail.
+      - name: Build image
+        run: |
+          docker build -f build/Dockerfile \
+            --build-arg NPM_VERSION --build-arg OPENRESTY_VERSION \
+            --build-arg MODSEC_VERSION --build-arg MODSEC_NGINX_VERSION \
+            --build-arg CRS_VERSION \
+            --build-arg BUILD_JOBS=4 \
+            -t "$IMAGE" -t "$IMAGE_LATEST" .
+
+      - name: Compose smoke test
+        run: |
+          set -eu
+          export NPM_MODSEC_IMAGE="$IMAGE"
+          docker compose -f docker-compose.test.yml up -d
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8181/ >/dev/null 2>&1 && break
+            sleep 2
+          done
+          bash scripts/smoke-test.sh
+
+      - name: Push to GHCR
+        run: |
+          docker push "$IMAGE"
+          docker push "$IMAGE_LATEST"
+
+  # Weekly: has upstream moved? Never auto-rebuild a drifted module — the pins
+  # are updated by a human, the build then re-derives args from the new binary.
+  drift-check:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare upstream latest with our pins
+        run: |
+          set -eu
+          docker pull jc21/nginx-proxy-manager:latest >/dev/null
+          actual_or=$(docker run --rm --entrypoint nginx jc21/nginx-proxy-manager:latest -V 2>&1 \
+            | sed -n 's/^nginx version: openresty\///p')
+          actual_npm=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
+            jc21/nginx-proxy-manager:latest | sed -n 's/^NPM_BUILD_VERSION=//p')
+          echo "upstream latest : NPM=${actual_npm} openresty=${actual_or}"
+          echo "our pins        : NPM=${NPM_VERSION} openresty=${OPENRESTY_VERSION}"
+          if [ "$actual_or" != "$OPENRESTY_VERSION" ] || [ "$actual_npm" != "$NPM_VERSION" ]; then
+            echo "::error::Upstream moved (NPM ${actual_npm} / openresty ${actual_or}). Update pins in this workflow env AND build/Dockerfile ARGs, then rebuild."
+            exit 1
+          fi
+          echo "no drift — pins current"
