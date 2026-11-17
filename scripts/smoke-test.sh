@@ -54,6 +54,13 @@ execsvc 'test -f /data/modsec/crs-setup.conf' \
   || die '/data/modsec/crs-setup.conf missing (s6 seed did not run)'
 pass "/data/modsec seeded"
 
+# 3b) overlay+ modules present (loading itself is proven by the nginx -t above)
+execsvc 'test -f /usr/lib/nginx/modules/ngx_http_vhost_traffic_status_module.so' \
+  || die 'vts module .so missing'
+execsvc 'test -f /usr/lib/nginx/modules/ngx_http_cache_purge_module.so' \
+  || die 'cache_purge module .so missing'
+pass "vts + cache_purge modules present"
+
 # 4) start the in-container WAF test instance
 execsvc 'mkdir -p /tmp/waf-test && nginx -c /etc/nginx-modsec-test/nginx-waf.conf' \
   || die 'could not start WAF test instance'

@@ -12,7 +12,7 @@ Validated by spike `001-npm-modsec` (see ../README.md).
 ```bash
 cd phase1
 docker build -f build/Dockerfile \
-  -t npm-modsec:2.17.0-modsec3.0.17-crs4.30.0 .
+  -t npm-modsec:2.17.0-modsec3.0.17-crs4.30.0-vts0.2.7-purge3.0.4 .
 ```
 
 Pins live in the Dockerfile ARGs. The build **fails loudly** if the official
@@ -22,7 +22,7 @@ the ABI guardrail: never ship a module built against a different nginx.
 ## Test before deploy
 
 ```bash
-NPM_MODSEC_IMAGE=npm-modsec:2.17.0-modsec3.0.17-crs4.30.0 \
+NPM_MODSEC_IMAGE=npm-modsec:2.17.0-modsec3.0.17-crs4.30.0-vts0.2.7-purge3.0.4 \
   docker compose -f docker-compose.test.yml up -d
 bash scripts/smoke-test.sh                      # self-diagnosing; expects SMOKE OK
 docker compose -f docker-compose.test.yml down -v   # -v wipes test data
@@ -44,6 +44,9 @@ container log lines.
 | `/usr/local/modsecurity/crs/` | CRS, version-pinned (rules/ + crs-setup.conf) |
 | `/etc/nginx/modsec/` | `main.conf` (include chain) + engine `modsecurity.conf` |
 | `/etc/nginx/modules/modsecurity.conf` | `load_module` line (NPM already includes this dir) |
+| `/usr/lib/nginx/modules/ngx_http_vhost_traffic_status_module.so` | **vts** — per-host traffic stats; loaded, inactive until configured |
+| `/usr/lib/nginx/modules/ngx_http_cache_purge_module.so` | **cache purge** — invalidation for `Cache Assets`; loaded, inactive until configured |
+| `/etc/nginx/modules/vts.conf` + `cache-purge.conf` | their `load_module` lines |
 | `/data/modsec/` | **tunables, seeded on first run** (survives rebuilds): `crs-setup.conf`, `rules-before.conf`, `rules-after.conf` |
 
 ## Enable the WAF
@@ -71,11 +74,53 @@ DetectionOnly (rules fire, requests still pass).
 Globally (all HTTP hosts): same two directives in `/data/nginx/custom/http_top.conf`.
 Stream (TCP) hosts are NOT covered — ModSecurity v3 is HTTP-only.
 
+## Optional proxy modules (vts, cache purge)
+
+Both are **loaded but inactive** — no directive is set until you configure them.
+
+### vts — per-host traffic visibility (the tuning feedback loop)
+
+`/data/nginx/custom/http_top.conf`:
+
+```nginx
+vhost_traffic_status_zone;
+```
+
+Then expose the status JSON somewhere protected (e.g. its own proxy host
+behind an access list):
+
+```nginx
+location /vts_status {
+    vhost_traffic_status_display;
+    vhost_traffic_status_display_format json;
+    # protect with an access list / allow-list!
+}
+```
+
+Per server zone you get request rates, status-code distribution, upstream
+response times, cache hit/miss and bandwidth — the data you tune
+`limit_req` / `proxy_cache_valid` with instead of guessing.
+
+### cache purge — invalidation for "Cache Assets"
+
+On hosts with Cache Assets enabled, add to the Advanced tab:
+
+```nginx
+proxy_cache_purge PURGE from 127.0.0.1;
+```
+
+Then invalidate a cached path:
+
+```bash
+curl -X PURGE https://host.example.com/path/to/asset
+```
+
 ## Update cadence
 
 1. NPM release → bump `NPM_VERSION`; if openresty changed, bump `OPENRESTY_VERSION` too (the args stage re-derives everything from the binary).
 2. CRS release → bump `CRS_VERSION`, rebuild, re-run smoke tests.
 3. Never edit CRS files in place — fork `crs-setup.conf` / exclusion files under `/data/modsec/`.
+4. Module pins (vts / cache purge) bump like any other: workflow env AND Dockerfile ARGs — `pins-sync` enforces the pair — then rebuild. The image tag carries them: `…-vts<vts>-purge<purge>`.
 
 ## Rollback
 

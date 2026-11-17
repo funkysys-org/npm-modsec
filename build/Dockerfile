@@ -17,6 +17,8 @@ ARG OPENRESTY_VERSION=1.31.8.1
 ARG MODSEC_VERSION=3.0.17
 ARG MODSEC_NGINX_VERSION=1.0.4
 ARG CRS_VERSION=v4.30.0
+ARG VTS_VERSION=v0.2.7
+ARG CACHE_PURGE_VERSION=3.0.4
 ARG BUILD_JOBS=6
 
 # --- stage 1: capture exact configure args from the official binary --------
@@ -32,7 +34,7 @@ RUN set -eu; \
 
 # --- stage 2: build libmodsecurity + connector + fetch CRS ------------------
 FROM debian:trixie-slim AS builder
-ARG MODSEC_VERSION MODSEC_NGINX_VERSION OPENRESTY_VERSION CRS_VERSION BUILD_JOBS
+ARG MODSEC_VERSION MODSEC_NGINX_VERSION OPENRESTY_VERSION CRS_VERSION VTS_VERSION CACHE_PURGE_VERSION BUILD_JOBS
 RUN set -eu; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -59,7 +61,11 @@ RUN set -eu; \
       https://github.com/owasp-modsecurity/ModSecurity-nginx /tmp/ModSecurity-nginx; \
     git clone --depth 1 --branch ${CRS_VERSION} \
       https://github.com/coreruleset/coreruleset /tmp/crs; \
-    cp /tmp/crs/crs-setup.conf.example /tmp/crs/crs-setup.conf
+    cp /tmp/crs/crs-setup.conf.example /tmp/crs/crs-setup.conf; \
+    git clone --depth 1 --branch ${VTS_VERSION} \
+      https://github.com/vozlt/nginx-module-vts /tmp/nginx-module-vts; \
+    git clone --depth 1 --branch ${CACHE_PURGE_VERSION} \
+      https://github.com/nginx-modules/ngx_cache_purge /tmp/ngx_cache_purge
 
 # openresty source at the tag the base binary was built from; geoip2 at the
 # literal path baked into the base's configure args
@@ -87,10 +93,15 @@ RUN set -eu; \
            MODSECURITY_INC=/usr/local/modsecurity/include \
            MODSECURITY_LIB=/usr/local/modsecurity/lib; \
     cd "$NGX"; \
-    ./configure $(cat /tmp/nginx-args) --add-dynamic-module=/tmp/ModSecurity-nginx; \
+    ./configure $(cat /tmp/nginx-args) \
+      --add-dynamic-module=/tmp/ModSecurity-nginx \
+      --add-dynamic-module=/tmp/nginx-module-vts \
+      --add-dynamic-module=/tmp/ngx_cache_purge; \
     make modules; \
     mkdir -p /tmp/out; \
-    cp objs/ngx_http_modsecurity_module.so /tmp/out/
+    cp objs/ngx_http_modsecurity_module.so \
+       objs/ngx_http_vhost_traffic_status_module.so \
+       objs/ngx_http_cache_purge_module.so /tmp/out/
 
 # --- stage 3: overlay onto the pristine official image ---------------------
 FROM jc21/nginx-proxy-manager:${NPM_VERSION}
@@ -109,6 +120,8 @@ RUN set -eu; \
 COPY --from=builder /usr/local/modsecurity/lib/libmodsecurity.so.3.0.17 /usr/local/modsecurity/lib/libmodsecurity.so.3.0.17
 COPY --from=builder /usr/local/modsecurity/etc /usr/local/modsecurity/etc
 COPY --from=builder /tmp/out/ngx_http_modsecurity_module.so /usr/lib/nginx/modules/
+COPY --from=builder /tmp/out/ngx_http_vhost_traffic_status_module.so /usr/lib/nginx/modules/
+COPY --from=builder /tmp/out/ngx_http_cache_purge_module.so /usr/lib/nginx/modules/
 COPY --from=builder /tmp/crs /usr/local/modsecurity/crs
 
 # engine config: paths here match the /data/modsec layout seeded on first run
@@ -139,6 +152,10 @@ RUN set -eu; \
     mkdir -p /etc/nginx/modules; \
     printf 'load_module /usr/lib/nginx/modules/ngx_http_modsecurity_module.so;\n' \
       > /etc/nginx/modules/modsecurity.conf; \
+    printf 'load_module /usr/lib/nginx/modules/ngx_http_vhost_traffic_status_module.so;\n' \
+      > /etc/nginx/modules/vts.conf; \
+    printf 'load_module /usr/lib/nginx/modules/ngx_http_cache_purge_module.so;\n' \
+      > /etc/nginx/modules/cache-purge.conf; \
     useradd -r -M npm; \
     mkdir -p /tmp/nginx /run/nginx /var/log/nginx /var/cache/nginx \
              /var/lib/nginx/cache/public /var/lib/nginx/cache/private \

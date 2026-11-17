@@ -21,6 +21,11 @@ env:
   MODSEC_VERSION: '3.0.17'
   MODSEC_NGINX_VERSION: '1.0.4'
   CRS_VERSION: 'v4.30.0'
+  VTS_VERSION: 'v0.2.7'
+  CACHE_PURGE_VERSION: '3.0.4'
+  # Node security floor for the base image (Broccoli2Shell / CVE-2026-111497
+  # was fixed in 26.12.1) — bumped by a human, enforced before every build.
+  NODE_FLOOR: '26.12.1'
   IMAGE_NAME: npm-modsec
 
 permissions:
@@ -37,7 +42,7 @@ jobs:
       - name: Assert env pins match build/Dockerfile ARGs
         run: |
           set -eu
-          for p in NPM_VERSION OPENRESTY_VERSION MODSEC_VERSION MODSEC_NGINX_VERSION CRS_VERSION; do
+          for p in NPM_VERSION OPENRESTY_VERSION MODSEC_VERSION MODSEC_NGINX_VERSION CRS_VERSION VTS_VERSION CACHE_PURGE_VERSION; do
             wf=$(printenv "$p")
             df=$(sed -n "s/^ARG ${p}=//p" build/Dockerfile)
             [ "$wf" = "$df" ] || { echo "::error::PIN MISMATCH ${p}: workflow='${wf}' dockerfile='${df}'"; exit 1; }
@@ -60,8 +65,24 @@ jobs:
 
       - name: Compute image ref
         run: |
-          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}:${NPM_VERSION}-modsec${MODSEC_VERSION}-crs${CRS_VERSION#v}" >> "$GITHUB_ENV"
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}:${NPM_VERSION}-modsec${MODSEC_VERSION}-crs${CRS_VERSION#v}-vts${VTS_VERSION#v}-purge${CACHE_PURGE_VERSION}" >> "$GITHUB_ENV"
           echo "IMAGE_LATEST=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}:latest" >> "$GITHUB_ENV"
+
+      # Fail fast if the base image's Node is below the security floor
+      # (Broccoli2Shell-class decoder CVEs) — before 30+ min of build time.
+      - name: Node security floor (base image)
+        run: |
+          set -eu
+          docker pull jc21/nginx-proxy-manager:${NPM_VERSION} >/dev/null
+          node_v=$(docker run --rm --entrypoint /usr/bin/node jc21/nginx-proxy-manager:${NPM_VERSION} --version)
+          node_v=${node_v#v}
+          echo "base image Node: ${node_v} (floor: ${NODE_FLOOR})"
+          IFS='.' read -r a b c <<< "$node_v"
+          IFS='.' read -r x y z <<< "$NODE_FLOOR"
+          if [ "$((a*10000+b*100+c))" -lt "$((x*10000+y*100+z))" ]; then
+            echo "::error::Base image Node ${node_v} is below the security floor ${NODE_FLOOR}. Bump NPM_VERSION to a base carrying a fixed Node."
+            exit 1
+          fi
 
       # The Dockerfile's 'args' stage fails the build if the official image's
       # openresty no longer matches OPENRESTY_VERSION — the ABI guardrail.
@@ -71,6 +92,8 @@ jobs:
             --build-arg NPM_VERSION --build-arg OPENRESTY_VERSION \
             --build-arg MODSEC_VERSION --build-arg MODSEC_NGINX_VERSION \
             --build-arg CRS_VERSION \
+            --build-arg VTS_VERSION \
+            --build-arg CACHE_PURGE_VERSION \
             --build-arg BUILD_JOBS=4 \
             -t "$IMAGE" -t "$IMAGE_LATEST" .
 
