@@ -12,11 +12,12 @@ on:
       - 'docker-compose.test.yml'
       - '.github/workflows/build.yml'
   workflow_dispatch:
-  schedule:
-    - cron: '23 4 * * 1'   # weekly upstream drift check (Mondays)
+  # NOTE: no schedule trigger anymore — upstream drift watching moved to
+  # funkysys-org/nginx-full (its drift-check covers openresty + NPM source).
 
 env:
-  NPM_VERSION: '2.17.0'
+  NPM_VERSION: '2.17.0'   # tag component only — the build FROMs NPM_BASE_IMAGE
+  NPM_BASE_IMAGE: 'ghcr.io/funkysys-org/nginx-full:2.17.0-or1.31.8.1'   # OUR parity-gated base (Phase A2)
   OPENRESTY_VERSION: '1.31.8.1'
   MODSEC_VERSION: '3.0.17'
   MODSEC_NGINX_VERSION: '1.0.4'
@@ -42,7 +43,7 @@ jobs:
       - name: Assert env pins match build/Dockerfile ARGs
         run: |
           set -eu
-          for p in NPM_VERSION OPENRESTY_VERSION MODSEC_VERSION MODSEC_NGINX_VERSION CRS_VERSION VTS_VERSION CACHE_PURGE_VERSION; do
+          for p in NPM_BASE_IMAGE OPENRESTY_VERSION MODSEC_VERSION MODSEC_NGINX_VERSION CRS_VERSION VTS_VERSION CACHE_PURGE_VERSION; do
             wf=$(printenv "$p")
             df=$(sed -n "s/^ARG ${p}=//p" build/Dockerfile)
             [ "$wf" = "$df" ] || { echo "::error::PIN MISMATCH ${p}: workflow='${wf}' dockerfile='${df}'"; exit 1; }
@@ -50,7 +51,6 @@ jobs:
           echo "pins in sync"
 
   build:
-    if: github.event_name != 'schedule'
     needs: pins-sync
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -73,8 +73,7 @@ jobs:
       - name: Node security floor (base image)
         run: |
           set -eu
-          docker pull jc21/nginx-proxy-manager:${NPM_VERSION} >/dev/null
-          node_v=$(docker run --rm --entrypoint /usr/bin/node jc21/nginx-proxy-manager:${NPM_VERSION} --version)
+          node_v=$(docker run --rm --entrypoint /usr/bin/node "$NPM_BASE_IMAGE" --version)
           node_v=${node_v#v}
           echo "base image Node: ${node_v} (floor: ${NODE_FLOOR})"
           IFS='.' read -r a b c <<< "$node_v"
@@ -84,12 +83,16 @@ jobs:
             exit 1
           fi
 
-      # The Dockerfile's 'args' stage fails the build if the official image's
+      # Fail fast & clear if the base is not published/accessible yet.
+      - name: Pull our base (parity-gated nginx-full)
+        run: docker pull "$NPM_BASE_IMAGE"
+
+      # The Dockerfile's 'args' stage fails the build if the base image's
       # openresty no longer matches OPENRESTY_VERSION — the ABI guardrail.
       - name: Build image
         run: |
           docker build -f build/Dockerfile \
-            --build-arg NPM_VERSION --build-arg OPENRESTY_VERSION \
+            --build-arg NPM_BASE_IMAGE --build-arg OPENRESTY_VERSION \
             --build-arg MODSEC_VERSION --build-arg MODSEC_NGINX_VERSION \
             --build-arg CRS_VERSION \
             --build-arg VTS_VERSION \
@@ -113,25 +116,8 @@ jobs:
           docker push "$IMAGE"
           docker push "$IMAGE_LATEST"
 
-  # Weekly: has upstream moved? Never auto-rebuild a drifted module — the pins
-  # are updated by a human, the build then re-derives args from the new binary.
-  drift-check:
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Compare upstream latest with our pins
-        run: |
-          set -eu
-          docker pull jc21/nginx-proxy-manager:latest >/dev/null
-          actual_or=$(docker run --rm --entrypoint nginx jc21/nginx-proxy-manager:latest -V 2>&1 \
-            | sed -n 's/^nginx version: openresty\///p')
-          actual_npm=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
-            jc21/nginx-proxy-manager:latest | sed -n 's/^NPM_BUILD_VERSION=//p')
-          echo "upstream latest : NPM=${actual_npm} openresty=${actual_or}"
-          echo "our pins        : NPM=${NPM_VERSION} openresty=${OPENRESTY_VERSION}"
-          if [ "$actual_or" != "$OPENRESTY_VERSION" ] || [ "$actual_npm" != "$NPM_VERSION" ]; then
-            echo "::error::Upstream moved (NPM ${actual_npm} / openresty ${actual_or}). Update pins in this workflow env AND build/Dockerfile ARGs, then rebuild."
-            exit 1
-          fi
-          echo "no drift — pins current"
+  # Upstream drift watching lives in funkysys-org/nginx-full now (its
+  # drift-check covers openresty releases + NPM source tags). This repo
+  # builds FROM our parity-gated base; its pins move with the base's pins.
+
+  # (drift-check job removed in Phase A2 — see git history for the original)

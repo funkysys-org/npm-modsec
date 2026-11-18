@@ -12,7 +12,10 @@
 #   * geoip2 must be cloned to /tmp/openresty/... because that absolute path
 #     appears verbatim in the base binary's configure arguments
 # ---------------------------------------------------------------------------
-ARG NPM_VERSION=2.17.0
+# Our base (Phase A2): the funkysys-org nginx-full NPM-equivalent image.
+# Parity-gated against the official build upstream of this repo's history —
+# see funkysys-org/nginx-full (scripts/parity-check.sh + committed oracle).
+ARG NPM_BASE_IMAGE=ghcr.io/funkysys-org/nginx-full:2.17.0-or1.31.8.1
 ARG OPENRESTY_VERSION=1.31.8.1
 ARG MODSEC_VERSION=3.0.17
 ARG MODSEC_NGINX_VERSION=1.0.4
@@ -24,7 +27,7 @@ ARG BUILD_JOBS=6
 # --- stage 1: capture exact configure args from the official binary --------
 # This is the ABI guardrail: if upstream bumps openresty, the pin check fails
 # the build loudly instead of shipping an incompatible module.
-FROM jc21/nginx-proxy-manager:${NPM_VERSION} AS args
+FROM ${NPM_BASE_IMAGE} AS args
 ARG OPENRESTY_VERSION
 RUN set -eu; \
     nginx -V 2>&1 | sed -n 's/^nginx version: openresty\///p' > /tmp/version; \
@@ -104,7 +107,7 @@ RUN set -eu; \
        objs/ngx_http_cache_purge_module.so /tmp/out/
 
 # --- stage 3: overlay onto the pristine official image ---------------------
-FROM jc21/nginx-proxy-manager:${NPM_VERSION}
+FROM ${NPM_BASE_IMAGE}
 ARG CRS_VERSION
 
 # runtime deps of libmodsecurity (verify with ldd after build; trixie names)
