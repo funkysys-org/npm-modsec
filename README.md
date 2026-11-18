@@ -1,9 +1,22 @@
 # npm-modsec — Nginx Proxy Manager + ModSecurity overlay image
 
-Thin overlay on the official `jc21/nginx-proxy-manager` image:
-libmodsecurity v3 + `ngx_http_modsecurity_module.so` + OWASP CRS, loaded via
-NPM's own `/etc/nginx/modules/*.conf` include. No stock file is modified; the
-WAF is **off by default** and enabled per proxy host from the UI.
+> **⛔ SUPERSEDED (Nov 2026, Phase A2b) — do not build from this repo.**
+> The WAF layer lives in [funkysys-org/nginx-full](https://github.com/funkysys-org/nginx-full)
+> now: one pipeline (parity-gated openresty base + NPM app assembly + the
+> WAF layer), one pin set, one drift-check. The last image published here —
+> already built FROM our own parity-gated base (Phase A2) — was
+> `ghcr.io/funkysys-org/npm-modsec:2.17.0-modsec3.0.17-crs4.30.0-vts0.2.7-purge3.0.4`.
+> Successor image:
+> `ghcr.io/funkysys-org/nginx-full:2.17.0-or1.31.8.1-modsec3.0.17-crs4.30.0-vts0.2.7-purge3.0.4`.
+> The product consuming it: [funkysys-org/proxywarden](https://github.com/funkysys-org/proxywarden).
+> The repo stays as the historical reference for the overlay mechanics
+> (builder stages, s6 seed, payload-matrix smoke).
+
+Historical note — the original mission: thin overlay on the official
+`jc21/nginx-proxy-manager` image: libmodsecurity v3 +
+`ngx_http_modsecurity_module.so` + OWASP CRS, loaded via NPM's own
+`/etc/nginx/modules/*.conf` include. No stock file was modified; the WAF is
+**off by default** and enabled per proxy host from the UI.
 
 Validated by spike `001-npm-modsec` (see ../README.md).
 
